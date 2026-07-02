@@ -246,11 +246,11 @@
                 <option value="delayed">Delayed / Development Feed</option>
               </select>
             </label>
-            <label>Client ID <input name="clientId" autocomplete="off" placeholder="Broker client ID" /></label>
-            <label>API Key <input name="apiKey" autocomplete="off" placeholder="API key" /></label>
-            <label>Access Token <input name="accessToken" autocomplete="off" placeholder="Access token" /></label>
-            <label>API Secret <input name="apiSecret" autocomplete="off" placeholder="Optional secret" /></label>
-            <label>Feed Token <input name="feedToken" autocomplete="off" placeholder="If broker requires it" /></label>
+            <label>Client ID <input name="clientId" disabled placeholder="Set in backend .env" /></label>
+            <label>API Key <input name="apiKey" disabled placeholder="Set in backend .env" /></label>
+            <label>Access Token <input name="accessToken" disabled placeholder="Set in backend .env" /></label>
+            <label>API Secret <input name="apiSecret" disabled placeholder="Set in backend .env" /></label>
+            <label>Feed Token <input name="feedToken" disabled placeholder="Set in backend .env" /></label>
             <label>WebSocket URL <input name="wsUrl" autocomplete="off" placeholder="Auto-filled or custom" /></label>
             <label>Quote API URL <input name="quoteUrl" autocomplete="off" placeholder="Auto-filled or custom" /></label>
             <label>Exchange Segment
@@ -264,7 +264,7 @@
             <button id="testApiBtn" type="button" class="ghost">Test Configuration</button>
           </form>
           <div id="brokerHelp" class="broker-help"></div>
-          <p class="hint">Security note: this first local dashboard stores values in this browser only. For production, keep API secrets in a backend service, not inside frontend code.</p>
+          <p class="hint">Security note: API secrets are not saved in browser. Put real broker credentials in backend `.env`, then run the backend and open the app from `http://127.0.0.1:8787`.</p>
         </section>
 
         <section class="panel">

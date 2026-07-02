@@ -1,0 +1,14 @@
+{
+  "name": "dhan-paper-trading-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Secure paper trading dashboard with local backend proxy for broker market data.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

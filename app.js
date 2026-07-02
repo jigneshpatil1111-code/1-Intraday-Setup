@@ -85,11 +85,22 @@ function loadState() {
       ...structuredClone(defaultState),
       ...parsed,
       settings: { ...defaultState.settings, ...(parsed.settings || {}) },
-      api: { ...defaultState.api, ...(parsed.api || {}) },
+      api: sanitizeApiState({ ...defaultState.api, ...(parsed.api || {}) }),
     };
   } catch {
     return structuredClone(defaultState);
   }
+}
+
+function sanitizeApiState(api) {
+  return {
+    ...api,
+    clientId: "",
+    apiKey: "",
+    accessToken: "",
+    apiSecret: "",
+    feedToken: "",
+  };
 }
 
 function saveState() {
@@ -896,6 +907,7 @@ document.getElementById("saveApiBtn").addEventListener("click", () => {
   const data = Object.fromEntries(new FormData(form));
   Object.keys(defaultState.api).forEach((key) => {
     if (key === "enabled") state.api[key] = form.elements[key].checked;
+    else if (["clientId", "apiKey", "accessToken", "apiSecret", "feedToken"].includes(key)) state.api[key] = "";
     else if (key !== "lastTestedAt") state.api[key] = data[key] || "";
   });
   saveState();
@@ -903,18 +915,28 @@ document.getElementById("saveApiBtn").addEventListener("click", () => {
   toast("Broker API settings saved");
 });
 
-document.getElementById("testApiBtn").addEventListener("click", () => {
+document.getElementById("testApiBtn").addEventListener("click", async () => {
   const form = document.getElementById("apiForm");
   const data = Object.fromEntries(new FormData(form));
   Object.keys(defaultState.api).forEach((key) => {
     if (key === "enabled") state.api[key] = form.elements[key].checked;
+    else if (["clientId", "apiKey", "accessToken", "apiSecret", "feedToken"].includes(key)) state.api[key] = "";
     else if (key !== "lastTestedAt") state.api[key] = data[key] || "";
   });
-  const missing = missingApiFields();
   state.api.lastTestedAt = new Date().toISOString();
   saveState();
   renderApiSettings();
-  toast(missing.length ? `Configuration incomplete: ${missing.join(", ")}` : "Configuration ready for backend live-feed adapter");
+  try {
+    if (location.protocol === "file:") {
+      toast("Secure backend use karne ke liye app http://127.0.0.1:8787 se open karo");
+      return;
+    }
+    const response = await fetch("http://127.0.0.1:8787/api/config/status");
+    const status = await response.json();
+    toast(status.configured ? `Backend ready: ${status.activeBroker}` : `Backend missing env: ${(status.missing || []).join(", ")}`);
+  } catch {
+    toast("Backend not running. Start with: node server.js");
+  }
 });
 
 document.getElementById("seedSignalsBtn").addEventListener("click", seedSignals);

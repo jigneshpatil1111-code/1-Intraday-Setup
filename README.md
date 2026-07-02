@@ -2,9 +2,41 @@
 
 Phase 1 dashboard for scanner-first paper trading. It does not place real orders.
 
-## Open
+## Open Frontend Only
 
 Open `index.html` in a browser.
+
+## Secure Backend Mode
+
+For broker API keys, use the backend. Do not put real API secrets in the browser.
+
+1. Copy `.env.example` to `.env`.
+2. Set `ACTIVE_BROKER` and fill that broker's credentials.
+3. Start the backend:
+
+```powershell
+node server.js
+```
+
+4. Open:
+
+```text
+http://127.0.0.1:8787
+```
+
+Backend API:
+
+- `GET /api/health`
+- `GET /api/brokers`
+- `GET /api/config/status`
+- `POST /api/market/quote`
+
+Security controls included:
+
+- API secrets stay in `.env`, which is ignored by Git.
+- Browser stores only non-secret UI preferences.
+- Security headers, CORS allow-list, request size limit, rate limit, input validation and masked config status.
+- Static files and API run from the same local origin in backend mode.
 
 ## Included
 
@@ -33,6 +65,6 @@ Next integration step:
 
 ## Broker API section
 
-Settings me `Broker API - Market Data` section hai. Isme DhanHQ, Zerodha Kite, Upstox, Angel One SmartAPI, Fyers, ya custom feed select karke client ID, API key, access token, feed token, WebSocket URL, quote API URL aur exchange segment save kar sakte ho.
+Settings me `Broker API - Market Data` section hai. Isme DhanHQ, Zerodha Kite, Upstox, Angel One SmartAPI, Fyers, ya custom feed select kar sakte ho. Real client ID, API key, access token aur feed token backend `.env` me rakhne hain.
 
-This dashboard stores credentials only in browser local storage for the first local paper-trading version. Real live-data integration should move secrets to a backend service before using real broker credentials.
+This dashboard does not store broker secrets in browser local storage.
