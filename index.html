@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dhan Paper Trading Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">D</span>
+        <div>
+          <strong>Paper Trade</strong>
+          <small>Phase 1 Scanner</small>
+        </div>
+      </div>
+      <nav>
+        <button class="nav-item active" data-view="dashboard">Dashboard</button>
+        <button class="nav-item" data-view="scanner">Scanner</button>
+        <button class="nav-item" data-view="trades">Paper Trades</button>
+        <button class="nav-item" data-view="journal">Trade Journal</button>
+        <button class="nav-item" data-view="analytics">Analytics</button>
+        <button class="nav-item" data-view="reports">Reports</button>
+        <button class="nav-item" data-view="settings">Settings</button>
+      </nav>
+    </aside>
+
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Nifty 500 paper trading platform</p>
+          <h1 id="viewTitle">Dashboard</h1>
+        </div>
+        <div class="market-strip">
+          <span id="marketStatus" class="status-pill">Checking...</span>
+          <span id="clock"></span>
+        </div>
+      </header>
+
+      <section class="market-tape" aria-label="Market watch">
+        <div class="tape-track">
+          <span>NIFTY 500 <strong class="positive">+0.42%</strong></span>
+          <span>BANK NIFTY <strong class="negative">-0.18%</strong></span>
+          <span>INDIA VIX <strong class="warning">13.82</strong></span>
+          <span>Scanner <strong class="positive">Live Ready</strong></span>
+          <span>Mode <strong>Paper Only</strong></span>
+          <span>Risk Lock <strong class="positive">Clear</strong></span>
+          <span>NIFTY 500 <strong class="positive">+0.42%</strong></span>
+          <span>BANK NIFTY <strong class="negative">-0.18%</strong></span>
+          <span>INDIA VIX <strong class="warning">13.82</strong></span>
+          <span>Scanner <strong class="positive">Live Ready</strong></span>
+        </div>
+      </section>
+
+      <section id="dashboard" class="view active">
+        <div class="metric-grid">
+          <article class="metric"><span>Virtual Capital</span><strong id="capitalMetric">₹0</strong></article>
+          <article class="metric"><span>Buying Power</span><strong id="buyingPowerMetric">₹0</strong></article>
+          <article class="metric"><span>Used Capital</span><strong id="usedCapitalMetric">₹0</strong></article>
+          <article class="metric"><span>Available Power</span><strong id="availablePowerMetric">₹0</strong></article>
+          <article class="metric"><span>Today P&L</span><strong id="todayPnlMetric">₹0</strong></article>
+          <article class="metric"><span>Open Trades</span><strong id="openTradesMetric">0</strong></article>
+          <article class="metric"><span>Signals Today</span><strong id="signalsMetric">0</strong></article>
+          <article class="metric"><span>Win Rate</span><strong id="winRateMetric">0%</strong></article>
+        </div>
+
+        <div class="split">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Active Signals</h2>
+              <div class="actions compact-actions">
+                <button id="seedSignalsBtn" class="ghost">Load Demo Signals</button>
+                <button id="resetDashboardBtn" class="ghost danger small-btn">Reset</button>
+              </div>
+            </div>
+            <div id="signalList" class="signal-list"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Running Paper Trades</h2>
+              <button class="ghost" data-view-link="trades">Manage</button>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Stock</th><th>Setup</th><th>Entry</th><th>LTP</th><th>P&L</th><th>Status</th></tr>
+                </thead>
+                <tbody id="openTradesBody"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="scanner" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Manual Signal Entry</h2>
+              <p>Add scanner signals until Dhan live feed is connected.</p>
+            </div>
+            <span class="status-pill good">No real orders</span>
+          </div>
+          <form id="signalForm" class="form-grid">
+            <label>Stock <input name="stock" required placeholder="TCS" /></label>
+            <label>Strategy
+              <select name="strategy">
+                <option>1% Setup</option>
+                <option>9/15 EMA Setup</option>
+              </select>
+            </label>
+            <label>Entry <input name="entry" required type="number" min="0" step="0.05" /></label>
+            <label>Stop Loss <input name="sl" required type="number" min="0" step="0.05" /></label>
+            <label>Target 1 <input name="target1" required type="number" min="0" step="0.05" /></label>
+            <label>Target 2 <input name="target2" type="number" min="0" step="0.05" /></label>
+            <button type="submit" class="primary">Add Signal</button>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Scanner Queue</h2><button id="clearSignalsBtn" class="ghost danger">Clear Signals</button></div>
+          <div id="scannerQueue" class="signal-list"></div>
+        </section>
+      </section>
+
+      <section id="trades" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Paper Trade Book</h2>
+            <button id="markToMarketBtn" class="ghost">Update Live P&L</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Stock</th><th>Strategy</th><th>Entry Time</th><th>Entry</th><th>Qty</th>
+                  <th>Capital</th><th>SL</th><th>T1</th><th>T2</th><th>LTP/Exit</th><th>P&L</th><th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="tradesBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="journal" class="view">
+        <section class="panel">
+          <div class="panel-head"><h2>Completed Trade Journal</h2><button id="exportJournalBtn" class="ghost">Export CSV</button></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th><th>Stock</th><th>Setup</th><th>Entry</th><th>Exit</th><th>Entry Time</th>
+                  <th>Exit Time</th><th>Qty</th><th>RR</th><th>P&L</th><th>Hold</th><th>Result</th><th>Notes</th>
+                </tr>
+              </thead>
+              <tbody id="journalBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="analytics" class="view">
+        <div class="metric-grid compact">
+          <article class="metric"><span>Daily P&L</span><strong id="dailyPnl">₹0</strong></article>
+          <article class="metric"><span>Weekly P&L</span><strong id="weeklyPnl">₹0</strong></article>
+          <article class="metric"><span>Monthly P&L</span><strong id="monthlyPnl">₹0</strong></article>
+          <article class="metric"><span>Max Drawdown</span><strong id="drawdownMetric">₹0</strong></article>
+        </div>
+        <div class="chart-grid">
+          <section class="panel"><h2>Equity Curve</h2><canvas id="equityChart" width="640" height="260"></canvas></section>
+          <section class="panel"><h2>Daily P&L</h2><canvas id="dailyChart" width="640" height="260"></canvas></section>
+          <section class="panel"><h2>Win / Loss</h2><canvas id="winLossChart" width="640" height="260"></canvas></section>
+          <section class="panel"><h2>Strategy Performance</h2><canvas id="strategyChart" width="640" height="260"></canvas></section>
+        </div>
+      </section>
+
+      <section id="reports" class="view">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Reports & Import</h2>
+              <p>Select exact date range, then download only those completed trades.</p>
+            </div>
+          </div>
+          <form id="reportRangeForm" class="report-range">
+            <label>Starting Date <input id="reportStartDate" name="startDate" type="date" required /></label>
+            <label>Ending Date <input id="reportEndDate" name="endDate" type="date" required /></label>
+            <div class="report-summary">
+              <span id="reportRangeStatus">Select report date range</span>
+            </div>
+          </form>
+          <div class="actions">
+            <button id="downloadCsvBtn" class="primary">Download CSV</button>
+            <button id="downloadXlsBtn" class="ghost">Download Excel</button>
+            <button id="printPdfBtn" class="ghost">Print / Save PDF</button>
+            <label class="file-button">Import CSV<input id="csvImport" type="file" accept=".csv" /></label>
+          </div>
+          <p class="hint">Future dates are blocked. Reports include only trades whose exit date is between Starting Date and Ending Date.</p>
+          <p class="hint">CSV import supports columns: Stock, Strategy, Entry, Exit, Quantity, P&L, Entry Time, Exit Time, Notes.</p>
+        </section>
+      </section>
+
+      <section id="settings" class="view">
+        <section class="panel">
+          <div class="panel-head"><h2>Capital & Risk Rules</h2><button id="saveSettingsBtn" class="primary">Save</button></div>
+          <form id="settingsForm" class="form-grid">
+            <label>Virtual Capital <input name="capital" type="number" min="1" step="100" /></label>
+            <label>Leverage <input name="leverage" type="number" min="1" step="0.5" /></label>
+            <label>Max Open Trades <input name="maxTrades" type="number" min="1" step="1" /></label>
+            <label>Allocation per Trade % <input name="allocationPct" type="number" min="1" max="100" step="1" /></label>
+            <label>Max Daily Loss % <input name="dailyLossPct" type="number" min="1" step="0.5" /></label>
+            <label>Max Weekly Loss % <input name="weeklyLossPct" type="number" min="1" step="0.5" /></label>
+            <label>Max Monthly Loss % <input name="monthlyLossPct" type="number" min="1" step="0.5" /></label>
+            <label>Daily Target % <input name="dailyTargetPct" type="number" min="1" step="0.5" /></label>
+          </form>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Broker API - Market Data</h2>
+              <p>Select broker and save API details for paper-trade live data fetch.</p>
+            </div>
+            <div class="api-status">
+              <span id="apiConnectionStatus" class="status-pill">Not Configured</span>
+              <button id="saveApiBtn" class="primary">Save API</button>
+            </div>
+          </div>
+          <form id="apiForm" class="form-grid api-form">
+            <label>Broker
+              <select name="broker" id="brokerSelect">
+                <option value="dhan">DhanHQ</option>
+                <option value="zerodha">Zerodha Kite</option>
+                <option value="upstox">Upstox</option>
+                <option value="angel">Angel One SmartAPI</option>
+                <option value="fyers">Fyers</option>
+                <option value="custom">Custom Feed</option>
+              </select>
+            </label>
+            <label>Data Mode
+              <select name="mode">
+                <option value="websocket">WebSocket Live Feed</option>
+                <option value="quote">Quote Snapshot API</option>
+                <option value="delayed">Delayed / Development Feed</option>
+              </select>
+            </label>
+            <label>Client ID <input name="clientId" autocomplete="off" placeholder="Broker client ID" /></label>
+            <label>API Key <input name="apiKey" autocomplete="off" placeholder="API key" /></label>
+            <label>Access Token <input name="accessToken" autocomplete="off" placeholder="Access token" /></label>
+            <label>API Secret <input name="apiSecret" autocomplete="off" placeholder="Optional secret" /></label>
+            <label>Feed Token <input name="feedToken" autocomplete="off" placeholder="If broker requires it" /></label>
+            <label>WebSocket URL <input name="wsUrl" autocomplete="off" placeholder="Auto-filled or custom" /></label>
+            <label>Quote API URL <input name="quoteUrl" autocomplete="off" placeholder="Auto-filled or custom" /></label>
+            <label>Exchange Segment
+              <select name="exchangeSegment">
+                <option value="NSE_EQ">NSE Equity</option>
+                <option value="BSE_EQ">BSE Equity</option>
+                <option value="NSE_FNO">NSE F&O</option>
+              </select>
+            </label>
+            <label class="checkbox-label"><input name="enabled" type="checkbox" /> Use this broker for paper-trade live data</label>
+            <button id="testApiBtn" type="button" class="ghost">Test Configuration</button>
+          </form>
+          <div id="brokerHelp" class="broker-help"></div>
+          <p class="hint">Security note: this first local dashboard stores values in this browser only. For production, keep API secrets in a backend service, not inside frontend code.</p>
+        </section>
+
+        <section class="panel">
+          <h2>Dhan Data Integration Plan</h2>
+          <div class="data-plan">
+            <p><strong>Recommended:</strong> Phase 1 me bhi DhanHQ Data API use karo, kyunki paper aur live trading same market feed par validate honge.</p>
+            <p><strong>Free fallback:</strong> Yahoo Finance / NSE website scraping sirf development ke liye rakho. Intraday paper trading results delayed ya unreliable ho sakte hain.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
