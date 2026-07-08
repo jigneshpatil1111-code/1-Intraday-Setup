@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const rootDir = resolve(__dirname);
@@ -41,7 +41,7 @@ const brokers = {
   },
   angel: {
     label: "Angel One SmartAPI",
-    required: ["ANGEL_CLIENT_ID", "ANGEL_API_KEY", "ANGEL_ACCESS_TOKEN", "ANGEL_FEED_TOKEN"],
+    required: ["ANGEL_CLIENT_ID", "ANGEL_API_KEY"],
   },
   fyers: {
     label: "Fyers",
@@ -67,6 +67,8 @@ const mimeTypes = {
 };
 
 const rateBuckets = new Map();
+const angelSymbolCache = new Map();
+let angelSessionCache = null;
 
 const server = createServer(async (req, res) => {
   const requestId = randomUUID();
@@ -140,6 +142,7 @@ async function routeApi(req, res, url, requestId) {
 async function fetchQuote(broker, body) {
   if (broker === "mock") return mockQuote(body);
   if (broker === "dhan") return dhanQuote(body);
+  if (broker === "angel") return angelQuote(body);
   if (broker === "custom") return customQuote(body);
   throw httpError(501, `${brokers[broker]?.label || broker} quote adapter is prepared but not enabled yet.`);
 }
@@ -178,6 +181,35 @@ async function customQuote(body) {
   return await brokerResponse(response);
 }
 
+async function angelQuote(body) {
+  const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["SBIN"]);
+  const exchange = angelExchangeCode(body.exchangeSegment || "NSE_EQ");
+  return await withAngelSession(async (session) => {
+    const resolved = await Promise.all(symbols.map((symbol) => resolveAngelInstrument(symbol, exchange, session)));
+    const exchangeTokens = resolved.reduce((acc, item) => {
+      if (!acc[item.exchange]) acc[item.exchange] = [];
+      acc[item.exchange].push(item.symboltoken);
+      return acc;
+    }, {});
+    const result = await angelApiFetch("/rest/secure/angelbroking/market/v1/quote", {
+      session,
+      body: {
+        mode: safeText(body.quoteMode || "LTP", 10).toUpperCase(),
+        exchangeTokens,
+      },
+    });
+    const fetched = result?.data?.fetched || [];
+    const quoteMap = new Map(fetched.map((item) => [item.symbolToken, item]));
+    return {
+      source: "angel",
+      generatedAt: new Date().toISOString(),
+      mode: safeText(body.quoteMode || "LTP", 10).toUpperCase(),
+      quotes: resolved.map((item) => normalizeAngelQuote(item, quoteMap.get(item.symboltoken))),
+      unfetched: result?.data?.unfetched || [],
+    };
+  });
+}
+
 function mockQuote(body) {
   const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["TCS", "INFY", "RELIANCE"]);
   return {
@@ -195,6 +227,22 @@ function mockQuote(body) {
   };
 }
 
+function normalizeAngelQuote(instrument, quote = {}) {
+  return {
+    symbol: instrument.symbol,
+    tradingSymbol: instrument.tradingsymbol,
+    exchange: instrument.exchange,
+    symbolToken: instrument.symboltoken,
+    ltp: Number(quote.ltp ?? 0),
+    open: quote.open ?? null,
+    high: quote.high ?? null,
+    low: quote.low ?? null,
+    close: quote.close ?? null,
+    changePct: quote.percentChange ?? null,
+    raw: quote,
+  };
+}
+
 async function brokerResponse(response) {
   const text = await response.text();
   let data;
@@ -207,6 +255,222 @@ async function brokerResponse(response) {
     throw httpError(response.status, "Broker API request failed", { brokerStatus: response.status, data });
   }
   return data;
+}
+
+async function withAngelSession(action) {
+  try {
+    const session = await ensureAngelSession(false);
+    return await action(session);
+  } catch (error) {
+    if (!shouldRefreshAngelSession(error)) throw error;
+    const session = await ensureAngelSession(true);
+    return await action(session);
+  }
+}
+
+function shouldRefreshAngelSession(error) {
+  return error?.status === 401 || error?.extra?.errorCode === "AG8001" || error?.extra?.errorCode === "AB1010";
+}
+
+async function ensureAngelSession(forceRefresh) {
+  if (!forceRefresh && angelSessionCache?.accessToken && angelSessionCache.expiresAt > Date.now()) {
+    return angelSessionCache;
+  }
+
+  const staticAccessToken = env("ANGEL_ACCESS_TOKEN", "");
+  const staticFeedToken = env("ANGEL_FEED_TOKEN", "");
+  if (!forceRefresh && staticAccessToken) {
+    angelSessionCache = {
+      accessToken: staticAccessToken,
+      refreshToken: env("ANGEL_REFRESH_TOKEN", ""),
+      feedToken: staticFeedToken,
+      expiresAt: nextIstMidnightEpoch(),
+    };
+    return angelSessionCache;
+  }
+
+  if (env("ANGEL_PASSWORD", "") && env("ANGEL_TOTP_SECRET", "")) {
+    const login = await angelApiFetch("/rest/auth/angelbroking/user/v1/loginByPassword", {
+      body: {
+        clientcode: env("ANGEL_CLIENT_ID"),
+        password: env("ANGEL_PASSWORD"),
+        totp: generateTotp(env("ANGEL_TOTP_SECRET")),
+      },
+      useAuth: false,
+    });
+    const data = login?.data || {};
+    angelSessionCache = {
+      accessToken: safeRequiredText(data.jwtToken, "Angel login did not return jwtToken"),
+      refreshToken: data.refreshToken || "",
+      feedToken: data.feedToken || staticFeedToken,
+      expiresAt: nextIstMidnightEpoch(),
+    };
+    return angelSessionCache;
+  }
+
+  const refreshToken = env("ANGEL_REFRESH_TOKEN", "");
+  if (refreshToken) {
+    const refresh = await angelApiFetch("/rest/auth/angelbroking/jwt/v1/generateTokens", {
+      body: { refreshToken },
+      useAuth: false,
+    });
+    const data = refresh?.data || {};
+    angelSessionCache = {
+      accessToken: safeRequiredText(data.jwtToken, "Angel token refresh did not return jwtToken"),
+      refreshToken: data.refreshToken || refreshToken,
+      feedToken: staticFeedToken,
+      expiresAt: nextIstMidnightEpoch(),
+    };
+    return angelSessionCache;
+  }
+
+  throw httpError(400, "Angel One is not configured", {
+    missing: missingAngelEnv(),
+  });
+}
+
+async function angelApiFetch(pathname, { session = null, body = {}, useAuth = true } = {}) {
+  const response = await fetch(`https://apiconnect.angelone.in${pathname}`, {
+    method: "POST",
+    headers: angelHeaders(session, useAuth),
+    body: JSON.stringify(body),
+  });
+  const data = await parseJsonSafe(response);
+  if (!response.ok || data?.status === false) {
+    throw httpError(response.ok ? 400 : response.status, data?.message || "Angel API request failed", {
+      errorCode: data?.errorcode || data?.errorCode || "",
+      data,
+    });
+  }
+  return data;
+}
+
+function angelHeaders(session, useAuth) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "X-UserType": "USER",
+    "X-SourceID": "WEB",
+    "X-PrivateKey": env("ANGEL_API_KEY"),
+    "X-ClientLocalIP": env("ANGEL_CLIENT_LOCAL_IP", "127.0.0.1"),
+    "X-ClientPublicIP": env("ANGEL_CLIENT_PUBLIC_IP", "127.0.0.1"),
+    "X-MACAddress": env("ANGEL_MAC_ADDRESS", "02:00:00:00:00:00"),
+  };
+  if (useAuth && session?.accessToken) headers.Authorization = `Bearer ${session.accessToken}`;
+  return headers;
+}
+
+async function parseJsonSafe(response) {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text.slice(0, 2000) };
+  }
+}
+
+async function resolveAngelInstrument(symbol, exchange, session) {
+  const cacheKey = `${exchange}:${symbol}`;
+  const cached = angelSymbolCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const result = await angelApiFetch("/rest/secure/angelbroking/order/v1/searchScrip", {
+    session,
+    body: {
+      exchange,
+      searchscrip: symbol,
+    },
+  });
+  const instrument = selectAngelInstrument(symbol, exchange, result?.data || []);
+  if (!instrument) {
+    throw httpError(404, `Angel symbol not found: ${symbol}`, { symbol, exchange });
+  }
+  const value = {
+    symbol,
+    exchange: instrument.exchange,
+    tradingsymbol: instrument.tradingsymbol,
+    symboltoken: instrument.symboltoken,
+  };
+  angelSymbolCache.set(cacheKey, { value, expiresAt: Date.now() + 12 * 60 * 60 * 1000 });
+  return value;
+}
+
+function selectAngelInstrument(symbol, exchange, items) {
+  const normalized = normalizeSymbol(symbol);
+  const scored = items
+    .filter((item) => item?.exchange === exchange)
+    .map((item) => ({ item, score: scoreAngelInstrument(normalized, item.tradingsymbol || "") }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored[0]?.item || null;
+}
+
+function scoreAngelInstrument(symbol, tradingSymbol) {
+  const normalizedTradingSymbol = normalizeSymbol(tradingSymbol);
+  if (normalizedTradingSymbol === symbol) return 100;
+  if (normalizedTradingSymbol === `${symbol}EQ`) return 90;
+  if (tradingSymbol === `${symbol}-EQ`) return 95;
+  if (tradingSymbol.startsWith(`${symbol}-`)) return 80;
+  if (normalizedTradingSymbol.startsWith(symbol)) return 60;
+  return 0;
+}
+
+function normalizeSymbol(value) {
+  return String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function angelExchangeCode(segment) {
+  const map = {
+    NSE_EQ: "NSE",
+    BSE_EQ: "BSE",
+    NSE_FNO: "NFO",
+  };
+  const key = safeText(segment, 20).toUpperCase();
+  if (!map[key]) throw httpError(400, "Unsupported Angel exchange segment");
+  return map[key];
+}
+
+function nextIstMidnightEpoch() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  ist.setHours(24, 0, 0, 0);
+  const diff = ist.getTime() - new Date(now.toLocaleString("en-US", { timeZone: "Asia/Kolkata" })).getTime();
+  return Date.now() + Math.max(60_000, diff - 60_000);
+}
+
+function generateTotp(secret) {
+  const normalized = String(secret).replace(/\s+/g, "").toUpperCase();
+  const key = decodeBase32(normalized);
+  const counter = Math.floor(Date.now() / 30_000);
+  const buffer = Buffer.alloc(8);
+  buffer.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
+  buffer.writeUInt32BE(counter >>> 0, 4);
+  const digest = createHmac("sha1", key).update(buffer).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const code = ((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).toString();
+  return code.padStart(6, "0");
+}
+
+function decodeBase32(value) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const char of value.replace(/=+$/g, "")) {
+    const index = alphabet.indexOf(char);
+    if (index === -1) throw httpError(400, "ANGEL_TOTP_SECRET is not valid base32");
+    bits += index.toString(2).padStart(5, "0");
+  }
+  const bytes = [];
+  for (let i = 0; i + 8 <= bits.length; i += 8) {
+    bytes.push(Number.parseInt(bits.slice(i, i + 8), 2));
+  }
+  return Buffer.from(bytes);
+}
+
+function safeRequiredText(value, message) {
+  const text = String(value || "").trim();
+  if (!text) throw httpError(500, message);
+  return text;
 }
 
 async function serveStatic(res, pathname, requestId) {
@@ -322,8 +586,22 @@ function safeText(value, maxLength) {
 }
 
 function missingBrokerEnv(broker) {
+  if (broker === "angel") return missingAngelEnv();
   const entry = brokers[broker] || brokers.mock;
   return entry.required.filter((key) => !env(key, ""));
+}
+
+function missingAngelEnv() {
+  const missing = [];
+  if (!env("ANGEL_CLIENT_ID", "")) missing.push("ANGEL_CLIENT_ID");
+  if (!env("ANGEL_API_KEY", "")) missing.push("ANGEL_API_KEY");
+  const hasStaticAccess = Boolean(env("ANGEL_ACCESS_TOKEN", ""));
+  const hasPasswordLogin = Boolean(env("ANGEL_PASSWORD", "") && env("ANGEL_TOTP_SECRET", ""));
+  const hasRefreshToken = Boolean(env("ANGEL_REFRESH_TOKEN", ""));
+  if (!hasStaticAccess && !hasPasswordLogin && !hasRefreshToken) {
+    missing.push("ANGEL_ACCESS_TOKEN or ANGEL_PASSWORD+ANGEL_TOTP_SECRET or ANGEL_REFRESH_TOKEN");
+  }
+  return missing;
 }
 
 function env(key, fallback = "") {

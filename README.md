@@ -76,3 +76,18 @@ For Railway or any cloud host:
 - Keep `PORT` managed by the platform.
 - Set `HOST=0.0.0.0`.
 - Open the app from the deployed domain, because frontend API calls use the same origin.
+
+## Angel One live data
+
+For Angel One quote snapshots:
+
+- Set `ACTIVE_BROKER=angel`
+- Set `ANGEL_CLIENT_ID` and `ANGEL_API_KEY`
+- Then use one auth path:
+  - preferred auto-login: `ANGEL_PASSWORD` and `ANGEL_TOTP_SECRET`
+  - or temporary token mode: `ANGEL_ACCESS_TOKEN`
+  - or refresh flow: `ANGEL_REFRESH_TOKEN`
+
+`ANGEL_FEED_TOKEN` is optional for this phase because the app currently uses quote snapshots, not live WebSocket streaming.
+
+Important: this project is still paper trading only. It does not place real orders.

@@ -75,6 +75,7 @@ const brokerPresets = {
 };
 
 let state = loadState();
+let liveQuoteInFlight = false;
 
 function loadState() {
   const raw = localStorage.getItem(storeKey);
@@ -143,6 +144,10 @@ function toast(message) {
   el.textContent = message;
   el.classList.add("show");
   setTimeout(() => el.classList.remove("show"), 2600);
+}
+
+function normalizeTicker(value) {
+  return String(value || "").toUpperCase().replace(/-EQ$/, "").replace(/[^A-Z0-9]/g, "");
 }
 
 function openTrades() {
@@ -626,6 +631,48 @@ function render() {
   renderCharts();
 }
 
+async function refreshLivePrices(silent = false) {
+  if (liveQuoteInFlight || location.protocol === "file:") return;
+  const symbols = [...new Set(openTrades().map((trade) => trade.stock).filter(Boolean))];
+  if (!symbols.length) {
+    if (!silent) toast("No open trades for live update");
+    return;
+  }
+
+  liveQuoteInFlight = true;
+  try {
+    const response = await fetch("/api/market/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        broker: state.api.enabled ? state.api.broker : "mock",
+        exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+        quoteMode: "LTP",
+        symbols,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Live price fetch failed");
+
+    const quotes = payload?.data?.quotes || [];
+    const quoteMap = new Map(quotes.map((quote) => [normalizeTicker(quote.symbol || quote.tradingSymbol), quote]));
+    let updated = 0;
+    openTrades().forEach((trade) => {
+      const quote = quoteMap.get(normalizeTicker(trade.stock));
+      if (!quote || !Number.isFinite(Number(quote.ltp)) || Number(quote.ltp) <= 0) return;
+      trade.currentPrice = Number(quote.ltp);
+      updated += 1;
+    });
+    saveState();
+    renderDashboardOnly();
+    if (!silent) toast(updated ? `Live prices updated: ${updated}` : "No matching live prices found");
+  } catch (error) {
+    if (!silent) toast(error.message || "Live price fetch failed");
+  } finally {
+    liveQuoteInFlight = false;
+  }
+}
+
 function reportDateRange() {
   const startEl = document.getElementById("reportStartDate");
   const endEl = document.getElementById("reportEndDate");
@@ -954,7 +1001,11 @@ document.getElementById("clearSignalsBtn").addEventListener("click", () => {
   render();
 });
 
-document.getElementById("markToMarketBtn").addEventListener("click", () => {
+document.getElementById("markToMarketBtn").addEventListener("click", async () => {
+  if (state.api.enabled && state.api.mode !== "delayed") {
+    await refreshLivePrices(false);
+    return;
+  }
   openTrades().forEach((trade) => {
     const drift = (Math.random() - 0.45) * trade.entry * 0.006;
     trade.currentPrice = Math.max(0.05, Number(trade.currentPrice) + drift);
@@ -977,5 +1028,10 @@ document.getElementById("csvImport").addEventListener("change", async (event) =>
 });
 
 setInterval(updateClock, 1000);
+setInterval(() => {
+  if (!state.api.enabled || state.api.mode === "delayed") return;
+  if (!openTrades().length) return;
+  refreshLivePrices(true);
+}, 30000);
 updateClock();
 render();
