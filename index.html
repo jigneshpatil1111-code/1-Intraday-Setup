@@ -97,6 +97,37 @@
         <section class="panel">
           <div class="panel-head">
             <div>
+              <h2>Auto Scanner</h2>
+              <p>Live quote watchlist se automatic breakout signal banao.</p>
+            </div>
+            <div class="api-status">
+              <span id="scannerStatus" class="status-pill">Auto Scanner Off</span>
+              <button id="scanNowBtn" type="button" class="ghost">Scan Now</button>
+            </div>
+          </div>
+          <form id="scannerForm" class="form-grid">
+            <label>Watchlist
+              <input name="watchlist" placeholder="SBIN,TCS,INFY,RELIANCE" />
+            </label>
+            <label>Scan Interval Seconds
+              <input name="intervalSec" type="number" min="15" step="15" />
+            </label>
+            <label>Trigger Move %
+              <input name="minMovePct" type="number" min="0.2" step="0.1" />
+            </label>
+            <label>Per Symbol Cooldown Minutes
+              <input name="signalCooldownMin" type="number" min="5" step="5" />
+            </label>
+            <label class="checkbox-label"><input name="enabled" type="checkbox" /> Enable automatic live scanner</label>
+            <button type="submit" class="primary">Save Scanner</button>
+          </form>
+          <p id="scannerMeta" class="hint">Scanner idle</p>
+          <p class="hint">Current auto scanner `1% Setup Auto` signals banata hai. `Auto paper trade on new signal` on hoga to same signal turant paper trade me convert ho jayega.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <div>
               <h2>Manual Signal Entry</h2>
               <p>Add scanner signals until Dhan live feed is connected.</p>
             </div>

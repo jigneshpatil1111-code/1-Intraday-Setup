@@ -26,6 +26,16 @@ const defaultState = {
     enabled: false,
     lastTestedAt: "",
   },
+  scanner: {
+    enabled: false,
+    watchlist: "SBIN,TCS,INFY,RELIANCE",
+    intervalSec: 60,
+    minMovePct: 1,
+    signalCooldownMin: 45,
+    lastScanAt: "",
+    lastScanStatus: "Scanner idle",
+    lastSignalBySymbol: {},
+  },
   signals: [],
   trades: [],
 };
@@ -88,6 +98,7 @@ function loadState() {
       ...parsed,
       settings: { ...defaultState.settings, ...(parsed.settings || {}) },
       api: sanitizeApiState({ ...defaultState.api, ...(parsed.api || {}) }),
+      scanner: { ...defaultState.scanner, ...(parsed.scanner || {}) },
     };
   } catch {
     return structuredClone(defaultState);
@@ -149,6 +160,19 @@ function toast(message) {
 
 function normalizeTicker(value) {
   return String(value || "").toUpperCase().replace(/-EQ$/, "").replace(/[^A-Z0-9]/g, "");
+}
+
+function listFromWatchlist(value) {
+  return [...new Set(String(value || "")
+    .split(/[\s,]+/)
+    .map((item) => normalizeTicker(item))
+    .filter(Boolean))];
+}
+
+function isMarketHours(date = new Date()) {
+  const minutes = date.getHours() * 60 + date.getMinutes();
+  const isWeekday = date.getDay() >= 1 && date.getDay() <= 5;
+  return isWeekday && minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
 function openTrades() {
@@ -324,6 +348,28 @@ function renderSignals() {
   const html = state.signals.length ? state.signals.map(signalCard).join("") : empty("No active scanner signals yet.");
   document.getElementById("signalList").innerHTML = html;
   document.getElementById("scannerQueue").innerHTML = html;
+}
+
+function renderScannerSettings() {
+  const form = document.getElementById("scannerForm");
+  if (!form) return;
+  Object.entries(state.scanner).forEach(([key, value]) => {
+    if (!form.elements[key]) return;
+    if (form.elements[key].type === "checkbox") form.elements[key].checked = Boolean(value);
+    else form.elements[key].value = value ?? "";
+  });
+  const status = document.getElementById("scannerStatus");
+  if (status) {
+    status.classList.toggle("good", Boolean(state.scanner.enabled));
+    status.classList.toggle("bad", !state.scanner.enabled);
+    status.textContent = state.scanner.enabled ? "Auto Scanner On" : "Auto Scanner Off";
+  }
+  const note = document.getElementById("scannerMeta");
+  if (note) {
+    const watchCount = listFromWatchlist(state.scanner.watchlist).length;
+    const lastScan = state.scanner.lastScanAt ? new Date(state.scanner.lastScanAt).toLocaleString("en-IN") : "Never";
+    note.textContent = `${state.scanner.lastScanStatus} | Watchlist ${watchCount} | Last scan ${lastScan}`;
+  }
 }
 
 function signalCard(signal) {
@@ -632,8 +678,86 @@ function render() {
   renderTrades();
   renderJournal();
   renderSettings();
+  renderScannerSettings();
   renderReportRange();
   renderCharts();
+}
+
+function hasActiveSignalOrTrade(symbol) {
+  const normalized = normalizeTicker(symbol);
+  return state.signals.some((signal) => normalizeTicker(signal.stock) === normalized)
+    || openTrades().some((trade) => normalizeTicker(trade.stock) === normalized);
+}
+
+function scannerSignalPayload(quote) {
+  const ltp = Number(quote.ltp || 0);
+  const open = Number(quote.open || ltp);
+  const movePct = open > 0 ? ((ltp - open) / open) * 100 : 0;
+  if (!Number.isFinite(ltp) || ltp <= 0 || !Number.isFinite(open) || open <= 0) return null;
+  if (movePct < Number(state.scanner.minMovePct || 1)) return null;
+  const symbol = normalizeTicker(quote.symbol || quote.tradingSymbol);
+  if (!symbol || hasActiveSignalOrTrade(symbol)) return null;
+
+  const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
+  const lastSignalAt = state.scanner.lastSignalBySymbol?.[symbol];
+  if (lastSignalAt && Date.now() - new Date(lastSignalAt).getTime() < cooldownMs) return null;
+
+  const stopLoss = Math.max(open, ltp * 0.995);
+  return {
+    stock: symbol,
+    strategy: "1% Setup Auto",
+    entry: Number(ltp.toFixed(2)),
+    sl: Number(stopLoss.toFixed(2)),
+    target1: Number((ltp * 1.01).toFixed(2)),
+    target2: Number((ltp * 1.015).toFixed(2)),
+  };
+}
+
+async function runAutoScanner(silent = false, force = false) {
+  if (!force && (!state.scanner.enabled || !isMarketHours())) return;
+  const symbols = listFromWatchlist(state.scanner.watchlist);
+  if (!symbols.length) {
+    state.scanner.lastScanStatus = "Scanner watchlist empty";
+    saveState();
+    renderScannerSettings();
+    if (!silent) toast("Scanner watchlist empty");
+    return;
+  }
+
+  try {
+    const response = await fetch("/api/market/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        broker: state.api.enabled ? state.api.broker : "mock",
+        exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+        quoteMode: "OHLC",
+        symbols,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Scanner fetch failed");
+    const quotes = payload?.data?.quotes || [];
+    let created = 0;
+    quotes.forEach((quote) => {
+      const signal = scannerSignalPayload(quote);
+      if (!signal) return;
+      state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
+      created += 1;
+      addSignal(signal);
+    });
+    state.scanner.lastScanAt = new Date().toISOString();
+    state.scanner.lastScanStatus = created ? `Scanner found ${created} signal${created > 1 ? "s" : ""}` : "Scanner found no setup";
+    saveState();
+    renderScannerSettings();
+    if (!silent) toast(state.scanner.lastScanStatus);
+  } catch (error) {
+    state.scanner.lastScanAt = new Date().toISOString();
+    state.scanner.lastScanStatus = error.message || "Scanner failed";
+    saveState();
+    renderScannerSettings();
+    if (!silent) toast(state.scanner.lastScanStatus);
+  }
 }
 
 async function refreshLivePrices(silent = false) {
@@ -894,9 +1018,7 @@ function seedSignals() {
 function updateClock() {
   const now = new Date();
   document.getElementById("clock").textContent = now.toLocaleString("en-IN");
-  const minutes = now.getHours() * 60 + now.getMinutes();
-  const isWeekday = now.getDay() >= 1 && now.getDay() <= 5;
-  const isMarket = isWeekday && minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+  const isMarket = isMarketHours(now);
   const status = document.getElementById("marketStatus");
   status.textContent = isMarket ? "Market Open" : "Market Closed";
   status.classList.toggle("good", isMarket);
@@ -940,6 +1062,24 @@ document.getElementById("signalForm").addEventListener("submit", (event) => {
   addSignal(Object.fromEntries(new FormData(event.target)));
   event.target.reset();
   toast("Signal added");
+});
+
+document.getElementById("scannerForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const form = event.target;
+  const data = Object.fromEntries(new FormData(form));
+  state.scanner.enabled = form.elements.enabled.checked;
+  state.scanner.watchlist = data.watchlist || "";
+  state.scanner.intervalSec = Math.max(15, Number(data.intervalSec || 60));
+  state.scanner.minMovePct = Math.max(0.2, Number(data.minMovePct || 1));
+  state.scanner.signalCooldownMin = Math.max(5, Number(data.signalCooldownMin || 45));
+  saveState();
+  renderScannerSettings();
+  toast("Auto scanner settings saved");
+});
+
+document.getElementById("scanNowBtn").addEventListener("click", async () => {
+  await runAutoScanner(false, true);
 });
 
 document.getElementById("saveSettingsBtn").addEventListener("click", () => {
@@ -1036,6 +1176,13 @@ document.getElementById("csvImport").addEventListener("change", async (event) =>
 });
 
 setInterval(updateClock, 1000);
+setInterval(() => {
+  if (!state.scanner.enabled) return;
+  const lastScanAt = state.scanner.lastScanAt ? new Date(state.scanner.lastScanAt).getTime() : 0;
+  const intervalMs = Math.max(15, Number(state.scanner.intervalSec || 60)) * 1000;
+  if (Date.now() - lastScanAt < intervalMs) return;
+  runAutoScanner(true, false);
+}, 15000);
 setInterval(() => {
   if (!state.api.enabled || state.api.mode === "delayed") return;
   if (!openTrades().length) return;
