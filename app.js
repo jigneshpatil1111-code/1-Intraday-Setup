@@ -321,16 +321,17 @@ function addSignal(data) {
   if (state.settings.autoPaperTrade) createTradeFromSignal(signal);
 }
 
-function closeTrade(id, exitPrice) {
+function closeTrade(id, exitPrice, reason = "") {
   const trade = state.trades.find((item) => item.id === id);
   if (!trade) return;
   trade.exit = Number(exitPrice || trade.currentPrice || trade.entry);
   trade.currentPrice = trade.exit;
   trade.exitTime = new Date().toISOString();
+  if (reason) trade.notes = trade.notes ? `${trade.notes}\n${reason}` : reason;
   trade.status = "Closed";
   saveState();
   render();
-  toast(`${trade.stock} closed. P&L ${money(tradePnl(trade))}`);
+  toast(`${trade.stock} paper SELL. P&L ${money(tradePnl(trade))}`);
 }
 
 function updateTrade(id, key, value) {
@@ -864,8 +865,14 @@ async function fetchCandleData(symbols, lookbackMinutes = 30) {
     }),
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || "Candle fetch failed");
-  return payload?.data?.candles || [];
+  if (!response.ok) {
+    const detail = payload?.data?.raw || payload?.data?.message || payload?.error || "Candle fetch failed";
+    throw new Error(detail);
+  }
+  const candles = payload?.data?.candles || [];
+  const hasAnySeries = candles.some((item) => Array.isArray(item.series) && item.series.length);
+  if (!hasAnySeries) throw new Error("No 5-minute candle data returned");
+  return candles;
 }
 
 function latestEma15(series) {
@@ -896,7 +903,7 @@ async function monitorStrategyExits(silent = true) {
         ? isRed && closeBelow15
         : lowBreak15 || closeBelow15;
       if (!shouldExit) return;
-      closeTrade(trade.id, Number(latest.close));
+      closeTrade(trade.id, Number(latest.close), "Auto exit: 5-minute 15 EMA rule");
       exited += 1;
     });
     if (!silent && exited) toast(`EMA exit triggered: ${exited}`);
@@ -906,6 +913,24 @@ async function monitorStrategyExits(silent = true) {
     renderScannerSettings();
     if (!silent) toast(error.message || "Exit monitor failed");
   }
+}
+
+function monitorPriceBasedExits(silent = true) {
+  let exited = 0;
+  openTrades().forEach((trade) => {
+    const currentPrice = Number(trade.currentPrice);
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) return;
+    if (Number(trade.stopLoss) > 0 && currentPrice <= Number(trade.stopLoss)) {
+      closeTrade(trade.id, currentPrice, "Auto exit: stop loss hit");
+      exited += 1;
+      return;
+    }
+    if (Number(trade.target2) > 0 && currentPrice >= Number(trade.target2)) {
+      closeTrade(trade.id, currentPrice, "Auto exit: final target hit");
+      exited += 1;
+    }
+  });
+  if (!silent && exited) toast(`Auto paper sell: ${exited}`);
 }
 
 function nextScannerBatch(mode) {
@@ -939,7 +964,7 @@ async function runAutoScanner(silent = false, force = false) {
     let created = 0;
     if (mode === "onepct") {
       const quotes = await fetchQuoteData(symbols, "OHLC");
-      const candles = await fetchCandleData(symbols, 180);
+      const candles = await fetchCandleData(symbols, 390);
       const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
       quotes.forEach((quote) => {
         const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
@@ -1011,6 +1036,7 @@ async function refreshLivePrices(silent = false) {
     });
     saveState();
     renderDashboardOnly();
+    monitorPriceBasedExits(true);
     if (!silent) toast(updated ? `Live prices updated: ${updated}` : "No matching live prices found");
   } catch (error) {
     if (!silent) toast(error.message || "Live price fetch failed");
@@ -1378,6 +1404,7 @@ document.getElementById("markToMarketBtn").addEventListener("click", async () =>
     trade.currentPrice = Math.max(0.05, Number(trade.currentPrice) + drift);
   });
   saveState();
+  monitorPriceBasedExits(true);
   render();
 });
 
@@ -1407,6 +1434,10 @@ setInterval(() => {
   if (!openTrades().length) return;
   refreshLivePrices(true);
 }, 30000);
+setInterval(() => {
+  if (!openTrades().length) return;
+  monitorPriceBasedExits(true);
+}, 10000);
 setInterval(() => {
   if (!state.api.enabled || !openTrades().length) return;
   monitorStrategyExits(true);

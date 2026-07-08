@@ -159,6 +159,7 @@ async function fetchQuote(broker, body) {
 }
 
 async function fetchCandles(broker, body) {
+  if (broker === "mock") return mockCandles(body);
   if (broker === "angel") return angelCandles(body);
   throw httpError(501, `${brokers[broker]?.label || broker} candle adapter is prepared but not enabled yet.`);
 }
@@ -230,7 +231,7 @@ async function angelCandles(body) {
   const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["SBIN"]);
   const exchange = angelExchangeCode(body.exchangeSegment || "NSE_EQ");
   const interval = safeText(body.interval || "ONE_MINUTE", 20).toUpperCase();
-  const lookbackMinutes = Math.min(120, Math.max(16, Number(body.lookbackMinutes || 30)));
+  const lookbackMinutes = Math.min(390, Math.max(16, Number(body.lookbackMinutes || 30)));
   return await withAngelSession(async (session) => {
     const resolved = await resolveAngelInstruments(symbols, exchange, session);
     const candles = [];
@@ -261,13 +262,61 @@ function mockQuote(body) {
     quotes: symbols.map((symbol, index) => {
       const base = 1000 + index * 375;
       const wave = Math.sin(Date.now() / 60000 + index) * 8;
+      const ltp = Number((base + wave).toFixed(2));
+      const open = Number((base * 0.995).toFixed(2));
       return {
         symbol,
-        ltp: Number((base + wave).toFixed(2)),
+        tradingSymbol: `${symbol}-EQ`,
+        ltp,
+        open,
+        high: Number(Math.max(ltp, open * 1.006).toFixed(2)),
+        low: Number(Math.min(open, ltp * 0.997).toFixed(2)),
+        close: Number((base * 0.99).toFixed(2)),
         changePct: Number((wave / base * 100).toFixed(2)),
       };
     }),
   };
+}
+
+function mockCandles(body) {
+  const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["TCS", "INFY", "RELIANCE"]);
+  const interval = safeText(body.interval || "FIVE_MINUTE", 20).toUpperCase();
+  const stepMinutes = interval === "FIVE_MINUTE" ? 5 : 1;
+  return {
+    source: "mock",
+    generatedAt: new Date().toISOString(),
+    interval,
+    candles: symbols.map((symbol, symbolIndex) => ({
+      symbol,
+      tradingSymbol: `${symbol}-EQ`,
+      exchange: "NSE",
+      symbolToken: `MOCK${symbolIndex}`,
+      series: mockCandleSeries(symbolIndex, stepMinutes),
+    })),
+  };
+}
+
+function mockCandleSeries(symbolIndex, stepMinutes) {
+  const start = new Date();
+  start.setHours(9, 15, 0, 0);
+  const series = [];
+  const base = 995 + symbolIndex * 373;
+  for (let i = 0; i < 42; i += 1) {
+    const time = new Date(start.getTime() + i * stepMinutes * 60_000);
+    const trend = i * 0.35;
+    const wave = Math.sin(i / 3 + symbolIndex) * 0.35;
+    const open = base + trend + wave;
+    const close = open + (i === 1 ? 0.9 : 0.28);
+    series.push({
+      time: formatAngelDate(time),
+      open: Number(open.toFixed(2)),
+      high: Number((Math.max(open, close) + 0.24).toFixed(2)),
+      low: Number((Math.min(open, close) - 0.18).toFixed(2)),
+      close: Number(close.toFixed(2)),
+      volume: 1000 + i * 10,
+    });
+  }
+  return series;
 }
 
 function normalizeAngelQuote(instrument, quote = {}) {
@@ -380,7 +429,9 @@ async function angelApiFetch(pathname, { session = null, body = {}, useAuth = tr
   });
   const data = await parseJsonSafe(response);
   if (!response.ok || data?.status === false) {
-    throw httpError(response.ok ? 400 : response.status, data?.message || "Angel API request failed", {
+    const detail = data?.message || data?.raw || data?.error || "";
+    const message = detail ? `Angel API request failed: ${String(detail).slice(0, 160)}` : "Angel API request failed";
+    throw httpError(response.ok ? 400 : response.status, message, {
       errorCode: data?.errorcode || data?.errorCode || "",
       data,
     });
@@ -516,11 +567,21 @@ function nextIstMidnightEpoch() {
 }
 
 function formatAngelDate(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Kolkata",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(date);
+  const getPart = (type) => parts.find((part) => part.type === type)?.value || "00";
+  const year = getPart("year");
+  const month = getPart("month");
+  const day = getPart("day");
+  const hours = getPart("hour");
+  const minutes = getPart("minute");
   return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
