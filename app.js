@@ -6,6 +6,7 @@ const defaultState = {
     leverage: 5,
     maxTrades: 2,
     allocationPct: 50,
+    autoPaperTrade: false,
     dailyLossPct: 3,
     weeklyLossPct: 8,
     monthlyLossPct: 15,
@@ -250,7 +251,7 @@ function createTradeFromSignal(signal) {
 }
 
 function addSignal(data) {
-  state.signals.unshift({
+  const signal = {
     id: uid("signal"),
     stock: data.stock.toUpperCase(),
     strategy: data.strategy,
@@ -259,9 +260,11 @@ function addSignal(data) {
     target1: Number(data.target1),
     target2: Number(data.target2 || data.target1),
     createdAt: new Date().toISOString(),
-  });
+  };
+  state.signals.unshift(signal);
   saveState();
   render();
+  if (state.settings.autoPaperTrade) createTradeFromSignal(signal);
 }
 
 function closeTrade(id, exitPrice) {
@@ -390,7 +393,9 @@ function renderJournal() {
 function renderSettings() {
   const form = document.getElementById("settingsForm");
   Object.entries(state.settings).forEach(([key, value]) => {
-    if (form.elements[key]) form.elements[key].value = value;
+    if (!form.elements[key]) return;
+    if (form.elements[key].type === "checkbox") form.elements[key].checked = Boolean(value);
+    else form.elements[key].value = value;
   });
   renderApiSettings();
 }
@@ -939,7 +944,10 @@ document.getElementById("signalForm").addEventListener("submit", (event) => {
 
 document.getElementById("saveSettingsBtn").addEventListener("click", () => {
   const data = Object.fromEntries(new FormData(document.getElementById("settingsForm")));
-  Object.keys(state.settings).forEach((key) => state.settings[key] = Number(data[key]));
+  Object.keys(state.settings).forEach((key) => {
+    if (key === "autoPaperTrade") state.settings[key] = document.getElementById("settingsForm").elements[key].checked;
+    else state.settings[key] = Number(data[key]);
+  });
   saveState();
   render();
   toast("Risk settings saved");
