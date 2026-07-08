@@ -1,4 +1,8 @@
 const storeKey = "dhan-paper-dashboard-v1";
+const DEFAULT_NIFTY500_SYMBOLS = Array.isArray(window.DEFAULT_NIFTY500_SYMBOLS) && window.DEFAULT_NIFTY500_SYMBOLS.length
+  ? window.DEFAULT_NIFTY500_SYMBOLS
+  : ["SBIN", "TCS", "INFY", "RELIANCE"];
+const DEFAULT_NIFTY500_WATCHLIST = DEFAULT_NIFTY500_SYMBOLS.join(",");
 
 const defaultState = {
   settings: {
@@ -28,10 +32,18 @@ const defaultState = {
   },
   scanner: {
     enabled: false,
-    watchlist: "SBIN,TCS,INFY,RELIANCE",
-    intervalSec: 60,
+    watchlist: DEFAULT_NIFTY500_WATCHLIST,
+    intervalSec: 30,
     minMovePct: 1,
     signalCooldownMin: 45,
+    morningStart: "09:15",
+    morningEnd: "09:55",
+    dayStart: "09:55",
+    dayEnd: "15:30",
+    morningBatchSize: 12,
+    dayBatchSize: 6,
+    morningCursor: 0,
+    dayCursor: 0,
     lastScanAt: "",
     lastScanStatus: "Scanner idle",
     lastSignalBySymbol: {},
@@ -173,6 +185,20 @@ function isMarketHours(date = new Date()) {
   const minutes = date.getHours() * 60 + date.getMinutes();
   const isWeekday = date.getDay() >= 1 && date.getDay() <= 5;
   return isWeekday && minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
+}
+
+function minutesSinceMidnight(value) {
+  const [hours, minutes] = String(value || "00:00").split(":").map((item) => Number(item || 0));
+  return hours * 60 + minutes;
+}
+
+function scannerModeAt(date = new Date()) {
+  const minutes = date.getHours() * 60 + date.getMinutes();
+  const isWeekday = date.getDay() >= 1 && date.getDay() <= 5;
+  if (!isWeekday) return "";
+  if (minutes >= minutesSinceMidnight(state.scanner.morningStart) && minutes < minutesSinceMidnight(state.scanner.morningEnd)) return "onepct";
+  if (minutes >= minutesSinceMidnight(state.scanner.dayStart) && minutes <= minutesSinceMidnight(state.scanner.dayEnd)) return "ema";
+  return "";
 }
 
 function openTrades() {
@@ -713,9 +739,65 @@ function scannerSignalPayload(quote) {
   };
 }
 
-async function runAutoScanner(silent = false, force = false) {
-  if (!force && (!state.scanner.enabled || !isMarketHours())) return;
+function emaSignalPayload(series, symbol) {
+  if (!Array.isArray(series) || series.length < 16) return null;
+  const closes = series.map((item) => Number(item.close)).filter((value) => Number.isFinite(value) && value > 0);
+  if (closes.length < 16) return null;
+  const ema9 = emaSeries(closes, 9);
+  const ema15 = emaSeries(closes, 15);
+  if (ema9.length < 2 || ema15.length < 2) return null;
+  const lastClose = closes.at(-1);
+  const prevEma9 = ema9.at(-2);
+  const prevEma15 = ema15.at(-2);
+  const lastEma9 = ema9.at(-1);
+  const lastEma15 = ema15.at(-1);
+  if (!(lastClose > lastEma9 && lastEma9 > lastEma15 && prevEma9 <= prevEma15)) return null;
+  if (hasActiveSignalOrTrade(symbol)) return null;
+
+  const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
+  const lastSignalAt = state.scanner.lastSignalBySymbol?.[symbol];
+  if (lastSignalAt && Date.now() - new Date(lastSignalAt).getTime() < cooldownMs) return null;
+
+  const recentLow = Math.min(...series.slice(-5).map((item) => Number(item.low)).filter((value) => Number.isFinite(value) && value > 0));
+  return {
+    stock: symbol,
+    strategy: "9/15 EMA Setup Auto",
+    entry: Number(lastClose.toFixed(2)),
+    sl: Number(Math.min(lastEma15, recentLow).toFixed(2)),
+    target1: Number((lastClose * 1.008).toFixed(2)),
+    target2: Number((lastClose * 1.015).toFixed(2)),
+  };
+}
+
+function emaSeries(values, period) {
+  const multiplier = 2 / (period + 1);
+  let previous = values[0];
+  const result = [previous];
+  for (let i = 1; i < values.length; i += 1) {
+    previous = (values[i] - previous) * multiplier + previous;
+    result.push(previous);
+  }
+  return result;
+}
+
+function nextScannerBatch(mode) {
   const symbols = listFromWatchlist(state.scanner.watchlist);
+  const batchSize = mode === "onepct" ? Number(state.scanner.morningBatchSize || 12) : Number(state.scanner.dayBatchSize || 6);
+  const cursorKey = mode === "onepct" ? "morningCursor" : "dayCursor";
+  if (!symbols.length) return [];
+  const start = Number(state.scanner[cursorKey] || 0) % symbols.length;
+  const batch = [];
+  for (let i = 0; i < Math.min(batchSize, symbols.length); i += 1) {
+    batch.push(symbols[(start + i) % symbols.length]);
+  }
+  state.scanner[cursorKey] = (start + batch.length) % symbols.length;
+  return batch;
+}
+
+async function runAutoScanner(silent = false, force = false) {
+  const mode = force ? (scannerModeAt() || "onepct") : scannerModeAt();
+  if (!force && (!state.scanner.enabled || !mode)) return;
+  const symbols = force ? listFromWatchlist(state.scanner.watchlist).slice(0, Number(state.scanner.morningBatchSize || 12)) : nextScannerBatch(mode);
   if (!symbols.length) {
     state.scanner.lastScanStatus = "Scanner watchlist empty";
     saveState();
@@ -725,29 +807,55 @@ async function runAutoScanner(silent = false, force = false) {
   }
 
   try {
-    const response = await fetch("/api/market/quote", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        broker: state.api.enabled ? state.api.broker : "mock",
-        exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
-        quoteMode: "OHLC",
-        symbols,
-      }),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Scanner fetch failed");
-    const quotes = payload?.data?.quotes || [];
     let created = 0;
-    quotes.forEach((quote) => {
-      const signal = scannerSignalPayload(quote);
-      if (!signal) return;
-      state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
-      created += 1;
-      addSignal(signal);
-    });
+    if (mode === "onepct") {
+      const response = await fetch("/api/market/quote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          broker: state.api.enabled ? state.api.broker : "mock",
+          exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+          quoteMode: "OHLC",
+          symbols,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Scanner fetch failed");
+      const quotes = payload?.data?.quotes || [];
+      quotes.forEach((quote) => {
+        const signal = scannerSignalPayload(quote);
+        if (!signal) return;
+        state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
+        created += 1;
+        addSignal(signal);
+      });
+    } else {
+      const response = await fetch("/api/market/candles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          broker: state.api.enabled ? state.api.broker : "mock",
+          exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+          interval: "ONE_MINUTE",
+          lookbackMinutes: 30,
+          symbols,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Scanner candle fetch failed");
+      const candles = payload?.data?.candles || [];
+      candles.forEach((item) => {
+        const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
+        if (!signal) return;
+        state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
+        created += 1;
+        addSignal(signal);
+      });
+    }
     state.scanner.lastScanAt = new Date().toISOString();
-    state.scanner.lastScanStatus = created ? `Scanner found ${created} signal${created > 1 ? "s" : ""}` : "Scanner found no setup";
+    state.scanner.lastScanStatus = created
+      ? `${mode === "onepct" ? "1% setup" : "9/15 EMA setup"} found ${created} signal${created > 1 ? "s" : ""}`
+      : `${mode === "onepct" ? "1% setup" : "9/15 EMA setup"} found no setup`;
     saveState();
     renderScannerSettings();
     if (!silent) toast(state.scanner.lastScanStatus);
@@ -1073,6 +1181,12 @@ document.getElementById("scannerForm").addEventListener("submit", (event) => {
   state.scanner.intervalSec = Math.max(15, Number(data.intervalSec || 60));
   state.scanner.minMovePct = Math.max(0.2, Number(data.minMovePct || 1));
   state.scanner.signalCooldownMin = Math.max(5, Number(data.signalCooldownMin || 45));
+  state.scanner.morningStart = data.morningStart || "09:15";
+  state.scanner.morningEnd = data.morningEnd || "09:55";
+  state.scanner.dayStart = data.dayStart || "09:55";
+  state.scanner.dayEnd = data.dayEnd || "15:30";
+  state.scanner.morningBatchSize = Math.max(5, Number(data.morningBatchSize || 12));
+  state.scanner.dayBatchSize = Math.max(3, Number(data.dayBatchSize || 6));
   saveState();
   renderScannerSettings();
   toast("Auto scanner settings saved");

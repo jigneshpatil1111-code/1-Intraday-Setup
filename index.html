@@ -118,11 +118,29 @@
             <label>Per Symbol Cooldown Minutes
               <input name="signalCooldownMin" type="number" min="5" step="5" />
             </label>
+            <label>1% Setup Start
+              <input name="morningStart" type="time" />
+            </label>
+            <label>1% Setup End
+              <input name="morningEnd" type="time" />
+            </label>
+            <label>9/15 EMA Start
+              <input name="dayStart" type="time" />
+            </label>
+            <label>9/15 EMA End
+              <input name="dayEnd" type="time" />
+            </label>
+            <label>Morning Batch Size
+              <input name="morningBatchSize" type="number" min="5" step="1" />
+            </label>
+            <label>Day Batch Size
+              <input name="dayBatchSize" type="number" min="3" step="1" />
+            </label>
             <label class="checkbox-label"><input name="enabled" type="checkbox" /> Enable automatic live scanner</label>
             <button type="submit" class="primary">Save Scanner</button>
           </form>
           <p id="scannerMeta" class="hint">Scanner idle</p>
-          <p class="hint">Current auto scanner `1% Setup Auto` signals banata hai. `Auto paper trade on new signal` on hoga to same signal turant paper trade me convert ho jayega.</p>
+          <p class="hint">Default watchlist current official Nifty 500 symbols se preloaded hai. 9:15-9:55 me `1% Setup Auto` chalega, aur uske baad day window me `9/15 EMA Setup Auto` batch scan chalega.</p>
         </section>
 
         <section class="panel">
@@ -310,6 +328,7 @@
     </main>
 
     <div id="toast" class="toast"></div>
+    <script src="nifty500-watchlist.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

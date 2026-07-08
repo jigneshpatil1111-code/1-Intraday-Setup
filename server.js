@@ -136,6 +136,17 @@ async function routeApi(req, res, url, requestId) {
     return sendJson(res, 200, { broker, data: quote, requestId });
   }
 
+  if (req.method === "POST" && url.pathname === "/api/market/candles") {
+    const body = await readJsonBody(req, 20_000);
+    const broker = sanitizeBroker(body.broker || config.activeBroker);
+    const missing = missingBrokerEnv(broker);
+    if (missing.length) {
+      return sendJson(res, 400, { error: "Broker is not configured", broker, missing, requestId });
+    }
+    const candles = await fetchCandles(broker, body);
+    return sendJson(res, 200, { broker, data: candles, requestId });
+  }
+
   return sendJson(res, 404, { error: "API route not found", requestId });
 }
 
@@ -145,6 +156,11 @@ async function fetchQuote(broker, body) {
   if (broker === "angel") return angelQuote(body);
   if (broker === "custom") return customQuote(body);
   throw httpError(501, `${brokers[broker]?.label || broker} quote adapter is prepared but not enabled yet.`);
+}
+
+async function fetchCandles(broker, body) {
+  if (broker === "angel") return angelCandles(body);
+  throw httpError(501, `${brokers[broker]?.label || broker} candle adapter is prepared but not enabled yet.`);
 }
 
 async function dhanQuote(body) {
@@ -185,7 +201,7 @@ async function angelQuote(body) {
   const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["SBIN"]);
   const exchange = angelExchangeCode(body.exchangeSegment || "NSE_EQ");
   return await withAngelSession(async (session) => {
-    const resolved = await Promise.all(symbols.map((symbol) => resolveAngelInstrument(symbol, exchange, session)));
+    const resolved = await resolveAngelInstruments(symbols, exchange, session);
     const exchangeTokens = resolved.reduce((acc, item) => {
       if (!acc[item.exchange]) acc[item.exchange] = [];
       acc[item.exchange].push(item.symboltoken);
@@ -206,6 +222,33 @@ async function angelQuote(body) {
       mode: safeText(body.quoteMode || "LTP", 10).toUpperCase(),
       quotes: resolved.map((item) => normalizeAngelQuote(item, quoteMap.get(item.symboltoken))),
       unfetched: result?.data?.unfetched || [],
+    };
+  });
+}
+
+async function angelCandles(body) {
+  const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["SBIN"]);
+  const exchange = angelExchangeCode(body.exchangeSegment || "NSE_EQ");
+  const interval = safeText(body.interval || "ONE_MINUTE", 20).toUpperCase();
+  const lookbackMinutes = Math.min(120, Math.max(16, Number(body.lookbackMinutes || 30)));
+  return await withAngelSession(async (session) => {
+    const resolved = await resolveAngelInstruments(symbols, exchange, session);
+    const candles = [];
+    for (const instrument of resolved) {
+      const series = await angelCandleSeries(session, instrument, interval, lookbackMinutes);
+      candles.push({
+        symbol: instrument.symbol,
+        tradingSymbol: instrument.tradingsymbol,
+        exchange: instrument.exchange,
+        symbolToken: instrument.symboltoken,
+        series,
+      });
+    }
+    return {
+      source: "angel",
+      generatedAt: new Date().toISOString(),
+      interval,
+      candles,
     };
   });
 }
@@ -370,10 +413,19 @@ async function parseJsonSafe(response) {
   }
 }
 
+async function resolveAngelInstruments(symbols, exchange, session) {
+  const resolved = [];
+  for (const symbol of symbols) {
+    resolved.push(await resolveAngelInstrument(symbol, exchange, session));
+  }
+  return resolved;
+}
+
 async function resolveAngelInstrument(symbol, exchange, session) {
   const cacheKey = `${exchange}:${symbol}`;
   const cached = angelSymbolCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) return cached.value;
+  await sleep(350);
 
   const result = await angelApiFetch("/rest/secure/angelbroking/order/v1/searchScrip", {
     session,
@@ -394,6 +446,30 @@ async function resolveAngelInstrument(symbol, exchange, session) {
   };
   angelSymbolCache.set(cacheKey, { value, expiresAt: Date.now() + 12 * 60 * 60 * 1000 });
   return value;
+}
+
+async function angelCandleSeries(session, instrument, interval, lookbackMinutes) {
+  const end = new Date();
+  const start = new Date(end.getTime() - lookbackMinutes * 60 * 1000);
+  const result = await angelApiFetch("/rest/secure/angelbroking/historical/v1/getCandleData", {
+    session,
+    body: {
+      exchange: instrument.exchange,
+      symboltoken: instrument.symboltoken,
+      interval,
+      fromdate: formatAngelDate(start),
+      todate: formatAngelDate(end),
+    },
+  });
+  const candles = Array.isArray(result?.data) ? result.data : [];
+  return candles.map((item) => ({
+    time: item[0],
+    open: Number(item[1]),
+    high: Number(item[2]),
+    low: Number(item[3]),
+    close: Number(item[4]),
+    volume: Number(item[5] || 0),
+  }));
 }
 
 function selectAngelInstrument(symbol, exchange, items) {
@@ -439,6 +515,15 @@ function nextIstMidnightEpoch() {
   return Date.now() + Math.max(60_000, diff - 60_000);
 }
 
+function formatAngelDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
+}
+
 function generateTotp(secret) {
   const normalized = String(secret).replace(/\s+/g, "").toUpperCase();
   const key = decodeBase32(normalized);
@@ -471,6 +556,10 @@ function safeRequiredText(value, message) {
   const text = String(value || "").trim();
   if (!text) throw httpError(500, message);
   return text;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function serveStatic(res, pathname, requestId) {
@@ -581,7 +670,7 @@ function sanitizeBroker(value) {
 
 function safeText(value, maxLength) {
   const text = String(value ?? "").trim();
-  if (!text || text.length > maxLength || !/^[\w.\-:/]+$/.test(text)) throw httpError(400, "Invalid input");
+  if (!text || text.length > maxLength || !/^[\w.\-:/&]+$/.test(text)) throw httpError(400, "Invalid input");
   return text;
 }
 
