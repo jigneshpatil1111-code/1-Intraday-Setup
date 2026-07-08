@@ -291,6 +291,9 @@ function createTradeFromSignal(signal) {
     entryTime: new Date().toISOString(),
     exit: null,
     exitTime: null,
+    setupKind: signal.setupKind || "",
+    exitRule: signal.exitRule || "",
+    riskReward: Number(signal.riskReward || 0),
     notes: "",
     status: "Open",
   });
@@ -716,27 +719,7 @@ function hasActiveSignalOrTrade(symbol) {
 }
 
 function scannerSignalPayload(quote) {
-  const ltp = Number(quote.ltp || 0);
-  const open = Number(quote.open || ltp);
-  const movePct = open > 0 ? ((ltp - open) / open) * 100 : 0;
-  if (!Number.isFinite(ltp) || ltp <= 0 || !Number.isFinite(open) || open <= 0) return null;
-  if (movePct < Number(state.scanner.minMovePct || 1)) return null;
-  const symbol = normalizeTicker(quote.symbol || quote.tradingSymbol);
-  if (!symbol || hasActiveSignalOrTrade(symbol)) return null;
-
-  const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
-  const lastSignalAt = state.scanner.lastSignalBySymbol?.[symbol];
-  if (lastSignalAt && Date.now() - new Date(lastSignalAt).getTime() < cooldownMs) return null;
-
-  const stopLoss = Math.max(open, ltp * 0.995);
-  return {
-    stock: symbol,
-    strategy: "1% Setup Auto",
-    entry: Number(ltp.toFixed(2)),
-    sl: Number(stopLoss.toFixed(2)),
-    target1: Number((ltp * 1.01).toFixed(2)),
-    target2: Number((ltp * 1.015).toFixed(2)),
-  };
+  return quote;
 }
 
 function emaSignalPayload(series, symbol) {
@@ -751,7 +734,13 @@ function emaSignalPayload(series, symbol) {
   const prevEma15 = ema15.at(-2);
   const lastEma9 = ema9.at(-1);
   const lastEma15 = ema15.at(-1);
-  if (!(lastClose > lastEma9 && lastEma9 > lastEma15 && prevEma9 <= prevEma15)) return null;
+  const ema15Rising = ema15.slice(-5).every((value, index, arr) => index === 0 || value >= arr[index - 1]);
+  const pullbackTouched = series.slice(-4, -1).some((item, index) => {
+    const ema9Value = ema9[ema9.length - 4 + index];
+    const ema15Value = ema15[ema15.length - 4 + index];
+    return Number(item.low) <= ema9Value && Number(item.low) >= ema15Value * 0.995;
+  });
+  if (!(lastClose > lastEma9 && lastEma9 > lastEma15 && prevEma9 <= prevEma15 && ema15Rising && pullbackTouched)) return null;
   if (hasActiveSignalOrTrade(symbol)) return null;
 
   const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
@@ -759,13 +748,19 @@ function emaSignalPayload(series, symbol) {
   if (lastSignalAt && Date.now() - new Date(lastSignalAt).getTime() < cooldownMs) return null;
 
   const recentLow = Math.min(...series.slice(-5).map((item) => Number(item.low)).filter((value) => Number.isFinite(value) && value > 0));
+  const stopLoss = Number(Math.min(lastEma15, recentLow).toFixed(2));
+  const risk = lastClose - stopLoss;
+  if (risk <= 0) return null;
   return {
     stock: symbol,
-    strategy: "9/15 EMA Setup Auto",
+    strategy: "9/15 Pullback Setup Auto",
     entry: Number(lastClose.toFixed(2)),
-    sl: Number(Math.min(lastEma15, recentLow).toFixed(2)),
-    target1: Number((lastClose * 1.008).toFixed(2)),
-    target2: Number((lastClose * 1.015).toFixed(2)),
+    sl: stopLoss,
+    target1: Number((lastClose + risk * 1.25).toFixed(2)),
+    target2: Number((lastClose + risk * 2.5).toFixed(2)),
+    setupKind: "pullback",
+    exitRule: "exit_on_15ema_break",
+    riskReward: 2.5,
   };
 }
 
@@ -778,6 +773,131 @@ function emaSeries(values, period) {
     result.push(previous);
   }
   return result;
+}
+
+function firstSessionCandle(series) {
+  return series.find((item) => String(item.time || "").includes("09:15"));
+}
+
+function afterSessionOpenSeries(series) {
+  const first = firstSessionCandle(series);
+  if (!first) return [];
+  const firstTime = String(first.time || "");
+  const index = series.findIndex((item) => String(item.time || "") === firstTime);
+  return index === -1 ? [] : series.slice(index);
+}
+
+function onePctSignalPayload(quote, series) {
+  const symbol = normalizeTicker(quote.symbol || quote.tradingSymbol);
+  if (!symbol || hasActiveSignalOrTrade(symbol)) return null;
+  const previousClose = Number(quote.close || 0);
+  const candles = afterSessionOpenSeries(series || []);
+  const first = candles[0];
+  if (!first || !Number.isFinite(previousClose) || previousClose <= 0) return null;
+
+  const gapUp = Number(first.open) > previousClose;
+  const firstMovePct = ((Number(first.high) - Number(first.open)) / Number(first.open)) * 100;
+  if (!gapUp || firstMovePct > 1) return null;
+
+  const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
+  const lastSignalAt = state.scanner.lastSignalBySymbol?.[symbol];
+  if (lastSignalAt && Date.now() - new Date(lastSignalAt).getTime() < cooldownMs) return null;
+
+  let breakoutCandle = null;
+  for (const candle of candles.slice(1)) {
+    if (Number(candle.low) < Number(first.low)) return null;
+    if (Number(candle.high) > Number(first.high) && Number(candle.close) > Number(first.high)) {
+      breakoutCandle = candle;
+      break;
+    }
+  }
+  if (!breakoutCandle) return null;
+
+  const entry = Number(Number(breakoutCandle.close).toFixed(2));
+  const sl = Number(Number(breakoutCandle.low).toFixed(2));
+  const risk = entry - sl;
+  if (risk <= 0) return null;
+  return {
+    stock: symbol,
+    strategy: "1% Setup Auto",
+    entry,
+    sl,
+    target1: Number((entry + risk * 2).toFixed(2)),
+    target2: Number((entry + risk * 3).toFixed(2)),
+    setupKind: "onepct",
+    exitRule: "exit_on_red_close_below_15ema",
+    riskReward: 3,
+  };
+}
+
+async function fetchQuoteData(symbols, quoteMode = "OHLC") {
+  const response = await fetch("/api/market/quote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      broker: state.api.enabled ? state.api.broker : "mock",
+      exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+      quoteMode,
+      symbols,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Quote fetch failed");
+  return payload?.data?.quotes || [];
+}
+
+async function fetchCandleData(symbols, lookbackMinutes = 30) {
+  const response = await fetch("/api/market/candles", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      broker: state.api.enabled ? state.api.broker : "mock",
+      exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
+      interval: "ONE_MINUTE",
+      lookbackMinutes,
+      symbols,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Candle fetch failed");
+  return payload?.data?.candles || [];
+}
+
+function latestEma15(series) {
+  if (!Array.isArray(series) || series.length < 15) return null;
+  const closes = series.map((item) => Number(item.close)).filter((value) => Number.isFinite(value) && value > 0);
+  if (closes.length < 15) return null;
+  return emaSeries(closes, 15).at(-1);
+}
+
+async function monitorStrategyExits(silent = true) {
+  const trades = openTrades().filter((trade) => trade.exitRule);
+  if (!trades.length || !state.api.enabled) return;
+  try {
+    const symbols = [...new Set(trades.map((trade) => trade.stock))];
+    const candles = await fetchCandleData(symbols, 35);
+    const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
+    let exited = 0;
+    trades.forEach((trade) => {
+      const series = candleMap.get(normalizeTicker(trade.stock)) || [];
+      if (series.length < 15) return;
+      const latest = series.at(-1);
+      const ema15 = latestEma15(series);
+      if (!latest || !ema15) return;
+      const isRed = Number(latest.close) < Number(latest.open);
+      const closeBelow15 = Number(latest.close) < ema15;
+      const lowBreak15 = Number(latest.low) <= ema15;
+      const shouldExit = trade.exitRule === "exit_on_red_close_below_15ema"
+        ? isRed && closeBelow15
+        : lowBreak15 || closeBelow15;
+      if (!shouldExit) return;
+      closeTrade(trade.id, Number(latest.close));
+      exited += 1;
+    });
+    if (!silent && exited) toast(`EMA exit triggered: ${exited}`);
+  } catch (error) {
+    if (!silent) toast(error.message || "Exit monitor failed");
+  }
 }
 
 function nextScannerBatch(mode) {
@@ -809,41 +929,18 @@ async function runAutoScanner(silent = false, force = false) {
   try {
     let created = 0;
     if (mode === "onepct") {
-      const response = await fetch("/api/market/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          broker: state.api.enabled ? state.api.broker : "mock",
-          exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
-          quoteMode: "OHLC",
-          symbols,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Scanner fetch failed");
-      const quotes = payload?.data?.quotes || [];
+      const quotes = await fetchQuoteData(symbols, "OHLC");
+      const candles = await fetchCandleData(symbols, 60);
+      const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
       quotes.forEach((quote) => {
-        const signal = scannerSignalPayload(quote);
+        const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
         if (!signal) return;
         state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
         created += 1;
         addSignal(signal);
       });
     } else {
-      const response = await fetch("/api/market/candles", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          broker: state.api.enabled ? state.api.broker : "mock",
-          exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
-          interval: "ONE_MINUTE",
-          lookbackMinutes: 30,
-          symbols,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "Scanner candle fetch failed");
-      const candles = payload?.data?.candles || [];
+      const candles = await fetchCandleData(symbols, 35);
       candles.forEach((item) => {
         const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
         if (!signal) return;
@@ -1301,5 +1398,9 @@ setInterval(() => {
   if (!openTrades().length) return;
   refreshLivePrices(true);
 }, 30000);
+setInterval(() => {
+  if (!state.api.enabled || !openTrades().length) return;
+  monitorStrategyExits(true);
+}, 45000);
 updateClock();
 render();
