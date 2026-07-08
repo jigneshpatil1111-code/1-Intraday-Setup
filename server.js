@@ -11,7 +11,7 @@ const rootDir = resolve(__dirname);
 loadEnvFile();
 
 const config = {
-  host: env("HOST", "127.0.0.1"),
+  host: env("HOST", "0.0.0.0"),
   port: numberEnv("PORT", 8787, 1, 65535),
   allowedOrigins: env("ALLOWED_ORIGINS", "http://127.0.0.1:8787,http://localhost:8787")
     .split(",")

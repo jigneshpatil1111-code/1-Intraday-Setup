@@ -68,3 +68,11 @@ Next integration step:
 Settings me `Broker API - Market Data` section hai. Isme DhanHQ, Zerodha Kite, Upstox, Angel One SmartAPI, Fyers, ya custom feed select kar sakte ho. Real client ID, API key, access token aur feed token backend `.env` me rakhne hain.
 
 This dashboard does not store broker secrets in browser local storage.
+
+## Railway deployment note
+
+For Railway or any cloud host:
+
+- Keep `PORT` managed by the platform.
+- Set `HOST=0.0.0.0`.
+- Open the app from the deployed domain, because frontend API calls use the same origin.

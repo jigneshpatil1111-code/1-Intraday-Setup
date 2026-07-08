@@ -931,7 +931,7 @@ document.getElementById("testApiBtn").addEventListener("click", async () => {
       toast("Secure backend use karne ke liye app http://127.0.0.1:8787 se open karo");
       return;
     }
-    const response = await fetch("http://127.0.0.1:8787/api/config/status");
+    const response = await fetch("/api/config/status");
     const status = await response.json();
     toast(status.configured ? `Backend ready: ${status.activeBroker}` : `Backend missing env: ${(status.missing || []).join(", ")}`);
   } catch {
