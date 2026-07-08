@@ -46,6 +46,7 @@ const defaultState = {
     dayCursor: 0,
     lastScanAt: "",
     lastScanStatus: "Scanner idle",
+    lastError: "",
     lastSignalBySymbol: {},
   },
   signals: [],
@@ -390,8 +391,10 @@ function renderScannerSettings() {
   const status = document.getElementById("scannerStatus");
   if (status) {
     status.classList.toggle("good", Boolean(state.scanner.enabled));
-    status.classList.toggle("bad", !state.scanner.enabled);
-    status.textContent = state.scanner.enabled ? "Auto Scanner On" : "Auto Scanner Off";
+    status.classList.toggle("bad", !state.scanner.enabled || Boolean(state.scanner.lastError));
+    status.textContent = state.scanner.lastError
+      ? "Scanner Warning"
+      : state.scanner.enabled ? "Auto Scanner On" : "Auto Scanner Off";
   }
   const note = document.getElementById("scannerMeta");
   if (note) {
@@ -399,6 +402,8 @@ function renderScannerSettings() {
     const lastScan = state.scanner.lastScanAt ? new Date(state.scanner.lastScanAt).toLocaleString("en-IN") : "Never";
     note.textContent = `${state.scanner.lastScanStatus} | Watchlist ${watchCount} | Last scan ${lastScan}`;
   }
+  const warning = document.getElementById("scannerWarning");
+  if (warning) warning.textContent = state.scanner.lastError || "";
 }
 
 function signalCard(signal) {
@@ -853,7 +858,7 @@ async function fetchCandleData(symbols, lookbackMinutes = 30) {
     body: JSON.stringify({
       broker: state.api.enabled ? state.api.broker : "mock",
       exchangeSegment: state.api.exchangeSegment || "NSE_EQ",
-      interval: "ONE_MINUTE",
+      interval: "FIVE_MINUTE",
       lookbackMinutes,
       symbols,
     }),
@@ -875,7 +880,7 @@ async function monitorStrategyExits(silent = true) {
   if (!trades.length || !state.api.enabled) return;
   try {
     const symbols = [...new Set(trades.map((trade) => trade.stock))];
-    const candles = await fetchCandleData(symbols, 35);
+    const candles = await fetchCandleData(symbols, 240);
     const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
     let exited = 0;
     trades.forEach((trade) => {
@@ -896,6 +901,9 @@ async function monitorStrategyExits(silent = true) {
     });
     if (!silent && exited) toast(`EMA exit triggered: ${exited}`);
   } catch (error) {
+    state.scanner.lastError = "Exit monitor skipped because 5-minute candle data is unavailable right now.";
+    saveState();
+    renderScannerSettings();
     if (!silent) toast(error.message || "Exit monitor failed");
   }
 }
@@ -927,10 +935,11 @@ async function runAutoScanner(silent = false, force = false) {
   }
 
   try {
+    state.scanner.lastError = "";
     let created = 0;
     if (mode === "onepct") {
       const quotes = await fetchQuoteData(symbols, "OHLC");
-      const candles = await fetchCandleData(symbols, 60);
+      const candles = await fetchCandleData(symbols, 180);
       const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
       quotes.forEach((quote) => {
         const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
@@ -940,7 +949,7 @@ async function runAutoScanner(silent = false, force = false) {
         addSignal(signal);
       });
     } else {
-      const candles = await fetchCandleData(symbols, 35);
+      const candles = await fetchCandleData(symbols, 240);
       candles.forEach((item) => {
         const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
         if (!signal) return;
@@ -959,9 +968,12 @@ async function runAutoScanner(silent = false, force = false) {
   } catch (error) {
     state.scanner.lastScanAt = new Date().toISOString();
     state.scanner.lastScanStatus = error.message || "Scanner failed";
+    state.scanner.lastError = /rate|too many requests|403|forbidden/i.test(error.message || "")
+      ? "Angel 5-minute candle API rate limit / access issue. Scanner wait karega aur phir retry karega."
+      : "5-minute candle data unavailable. Setup validation tabhi hoga jab broker candles return karega.";
     saveState();
     renderScannerSettings();
-    if (!silent) toast(state.scanner.lastScanStatus);
+    if (!silent) toast(state.scanner.lastError || state.scanner.lastScanStatus);
   }
 }
 
