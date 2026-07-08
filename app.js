@@ -1117,9 +1117,8 @@ function splitCsvLine(line) {
 
 function seedSignals() {
   [
-    { stock: "TCS", strategy: "1% Setup", entry: 3850, sl: 3835, target1: 3895, target2: 3920 },
-    { stock: "INFY", strategy: "9/15 EMA Setup", entry: 1510, sl: 1501, target1: 1532, target2: 1548 },
-    { stock: "RELIANCE", strategy: "1% Setup", entry: 2920, sl: 2898, target1: 2970, target2: 3005 },
+    { stock: "AETHER", strategy: "1% Setup", entry: 1413.4, sl: 1398, target1: 1424, target2: 1438 },
+    { stock: "KALYANKJIL", strategy: "Pullback Setup", entry: 374.15, sl: 367, target1: 382, target2: 386.4 },
   ].forEach(addSignal);
 }
 
