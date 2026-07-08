@@ -231,7 +231,7 @@ async function angelCandles(body) {
   const symbols = validateSymbolList(body.symbols?.length ? body.symbols : ["SBIN"]);
   const exchange = angelExchangeCode(body.exchangeSegment || "NSE_EQ");
   const interval = safeText(body.interval || "ONE_MINUTE", 20).toUpperCase();
-  const lookbackMinutes = Math.min(390, Math.max(16, Number(body.lookbackMinutes || 30)));
+  const lookbackMinutes = Math.min(600, Math.max(16, Number(body.lookbackMinutes || 30)));
   return await withAngelSession(async (session) => {
     const resolved = await resolveAngelInstruments(symbols, exchange, session);
     const candles = [];

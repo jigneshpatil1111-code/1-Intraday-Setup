@@ -887,7 +887,7 @@ async function monitorStrategyExits(silent = true) {
   if (!trades.length || !state.api.enabled) return;
   try {
     const symbols = [...new Set(trades.map((trade) => trade.stock))];
-    const candles = await fetchCandleData(symbols, 240);
+    const candles = await fetchCandleData(symbols, 600);
     const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
     let exited = 0;
     trades.forEach((trade) => {
@@ -964,7 +964,7 @@ async function runAutoScanner(silent = false, force = false) {
     let created = 0;
     if (mode === "onepct") {
       const quotes = await fetchQuoteData(symbols, "OHLC");
-      const candles = await fetchCandleData(symbols, 390);
+      const candles = await fetchCandleData(symbols, 600);
       const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
       quotes.forEach((quote) => {
         const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
@@ -974,7 +974,7 @@ async function runAutoScanner(silent = false, force = false) {
         addSignal(signal);
       });
     } else {
-      const candles = await fetchCandleData(symbols, 240);
+      const candles = await fetchCandleData(symbols, 600);
       candles.forEach((item) => {
         const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
         if (!signal) return;
