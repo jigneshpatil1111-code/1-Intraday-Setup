@@ -1212,11 +1212,8 @@ function splitCsvLine(line) {
   return result;
 }
 
-function seedSignals() {
-  [
-    { stock: "AETHER", strategy: "1% Setup", entry: 1413.4, sl: 1398, target1: 1424, target2: 1438 },
-    { stock: "KALYANKJIL", strategy: "Pullback Setup", entry: 374.15, sl: 367, target1: 382, target2: 386.4 },
-  ].forEach(addSignal);
+async function seedSignals() {
+  await runAutoScanner(false, true);
 }
 
 function updateClock() {
