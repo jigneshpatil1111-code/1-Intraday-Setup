@@ -38,7 +38,7 @@ const defaultState = {
     signalCooldownMin: 45,
     morningStart: "09:15",
     morningEnd: "09:55",
-    dayStart: "09:55",
+    dayStart: "09:15",
     dayEnd: "15:30",
     morningBatchSize: 12,
     dayBatchSize: 6,
@@ -111,7 +111,14 @@ function loadState() {
       ...parsed,
       settings: { ...defaultState.settings, ...(parsed.settings || {}) },
       api: sanitizeApiState({ ...defaultState.api, ...(parsed.api || {}) }),
-      scanner: { ...defaultState.scanner, ...(parsed.scanner || {}) },
+      scanner: {
+        ...defaultState.scanner,
+        ...(parsed.scanner || {}),
+        // Migrate the old post-09:55 pullback window to the full trading day.
+        dayStart: parsed.scanner?.dayStart === "09:55"
+          ? "09:15"
+          : (parsed.scanner?.dayStart || defaultState.scanner.dayStart),
+      },
     };
   } catch {
     return structuredClone(defaultState);
@@ -194,12 +201,21 @@ function minutesSinceMidnight(value) {
 }
 
 function scannerModeAt(date = new Date()) {
+  return scannerModesAt(date)[0] || "";
+}
+
+function scannerModesAt(date = new Date()) {
   const minutes = date.getHours() * 60 + date.getMinutes();
   const isWeekday = date.getDay() >= 1 && date.getDay() <= 5;
-  if (!isWeekday) return "";
-  if (minutes >= minutesSinceMidnight(state.scanner.morningStart) && minutes < minutesSinceMidnight(state.scanner.morningEnd)) return "onepct";
-  if (minutes >= minutesSinceMidnight(state.scanner.dayStart) && minutes <= minutesSinceMidnight(state.scanner.dayEnd)) return "ema";
-  return "";
+  if (!isWeekday) return [];
+  const modes = [];
+  if (minutes >= minutesSinceMidnight(state.scanner.morningStart) && minutes < minutesSinceMidnight(state.scanner.morningEnd)) {
+    modes.push("onepct");
+  }
+  if (minutes >= minutesSinceMidnight(state.scanner.dayStart) && minutes <= minutesSinceMidnight(state.scanner.dayEnd)) {
+    modes.push("ema");
+  }
+  return modes;
 }
 
 function openTrades() {
@@ -736,8 +752,6 @@ function emaSignalPayload(series, symbol) {
   const ema15 = emaSeries(closes, 15);
   if (ema9.length < 2 || ema15.length < 2) return null;
   const lastClose = closes.at(-1);
-  const prevEma9 = ema9.at(-2);
-  const prevEma15 = ema15.at(-2);
   const lastEma9 = ema9.at(-1);
   const lastEma15 = ema15.at(-1);
   const ema15Rising = ema15.slice(-5).every((value, index, arr) => index === 0 || value >= arr[index - 1]);
@@ -746,7 +760,10 @@ function emaSignalPayload(series, symbol) {
     const ema15Value = ema15[ema15.length - 4 + index];
     return Number(item.low) <= ema9Value && Number(item.low) >= ema15Value * 0.995;
   });
-  if (!(lastClose > lastEma9 && lastEma9 > lastEma15 && prevEma9 <= prevEma15 && ema15Rising && pullbackTouched)) return null;
+  // A pullback may occur long after the original 9/15 crossover. The valid
+  // continuation is the reclaim above EMA 9 while EMA 9 remains above a
+  // rising EMA 15 and a recent candle has tested the EMA pullback zone.
+  if (!(lastClose > lastEma9 && lastEma9 > lastEma15 && ema15Rising && pullbackTouched)) return null;
   if (hasActiveSignalOrTrade(symbol)) return null;
 
   const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
@@ -801,9 +818,20 @@ function onePctSignalPayload(quote, series) {
   const first = candles[0];
   if (!first || !Number.isFinite(previousClose) || previousClose <= 0) return null;
 
-  const gapUp = Number(first.open) > previousClose;
-  const firstMovePct = ((Number(first.high) - Number(first.open)) / Number(first.open)) * 100;
-  if (!gapUp || firstMovePct > 1) return null;
+  const firstOpen = Number(first.open);
+  const firstHigh = Number(first.high);
+  const gapUp = firstOpen > previousClose;
+  const maxFirstCandleMovePct = Math.min(1, Math.max(0.2, Number(state.scanner.minMovePct || 1)));
+  const firstMovePct = ((firstHigh - firstOpen) / firstOpen) * 100;
+
+  // 1% Setup hard rule: the 09:15 candle's Open-to-High move must
+  // stay within 1%. A candle above this limit is not a valid setup.
+  if (
+    !gapUp
+    || !Number.isFinite(firstMovePct)
+    || firstMovePct < 0
+    || firstMovePct > maxFirstCandleMovePct
+  ) return null;
 
   const cooldownMs = Number(state.scanner.signalCooldownMin || 45) * 60 * 1000;
   const lastSignalAt = state.scanner.lastSignalBySymbol?.[symbol];
@@ -948,10 +976,17 @@ function nextScannerBatch(mode) {
 }
 
 async function runAutoScanner(silent = false, force = false) {
-  const mode = force ? (scannerModeAt() || "onepct") : scannerModeAt();
-  if (!force && (!state.scanner.enabled || !mode)) return;
-  const symbols = force ? listFromWatchlist(state.scanner.watchlist).slice(0, Number(state.scanner.morningBatchSize || 12)) : nextScannerBatch(mode);
-  if (!symbols.length) {
+  const activeModes = force ? (scannerModesAt().length ? scannerModesAt() : ["onepct", "ema"]) : scannerModesAt();
+  if (!force && (!state.scanner.enabled || !activeModes.length)) return;
+  const modeBatches = activeModes.map((mode) => ({
+    mode,
+    symbols: force
+      ? listFromWatchlist(state.scanner.watchlist).slice(0, mode === "onepct"
+        ? Number(state.scanner.morningBatchSize || 12)
+        : Number(state.scanner.dayBatchSize || 6))
+      : nextScannerBatch(mode),
+  }));
+  if (!modeBatches.some((item) => item.symbols.length)) {
     state.scanner.lastScanStatus = "Scanner watchlist empty";
     saveState();
     renderScannerSettings();
@@ -962,31 +997,35 @@ async function runAutoScanner(silent = false, force = false) {
   try {
     state.scanner.lastError = "";
     let created = 0;
-    if (mode === "onepct") {
-      const quotes = await fetchQuoteData(symbols, "OHLC");
-      const candles = await fetchCandleData(symbols, 600);
-      const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
-      quotes.forEach((quote) => {
-        const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
-        if (!signal) return;
-        state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
-        created += 1;
-        addSignal(signal);
-      });
-    } else {
-      const candles = await fetchCandleData(symbols, 600);
-      candles.forEach((item) => {
-        const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
-        if (!signal) return;
-        state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
-        created += 1;
-        addSignal(signal);
-      });
+    for (const { mode, symbols } of modeBatches) {
+      if (!symbols.length) continue;
+      if (mode === "onepct") {
+        const quotes = await fetchQuoteData(symbols, "OHLC");
+        const candles = await fetchCandleData(symbols, 600);
+        const candleMap = new Map(candles.map((item) => [normalizeTicker(item.symbol || item.tradingSymbol), item.series || []]));
+        quotes.forEach((quote) => {
+          const signal = onePctSignalPayload(scannerSignalPayload(quote), candleMap.get(normalizeTicker(quote.symbol || quote.tradingSymbol)) || []);
+          if (!signal) return;
+          state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
+          created += 1;
+          addSignal(signal);
+        });
+      } else {
+        const candles = await fetchCandleData(symbols, 600);
+        candles.forEach((item) => {
+          const signal = emaSignalPayload(item.series || [], normalizeTicker(item.symbol || item.tradingSymbol));
+          if (!signal) return;
+          state.scanner.lastSignalBySymbol[signal.stock] = new Date().toISOString();
+          created += 1;
+          addSignal(signal);
+        });
+      }
     }
+    const scannedLabels = activeModes.map((mode) => mode === "onepct" ? "1% setup" : "Pullback setup").join(" + ");
     state.scanner.lastScanAt = new Date().toISOString();
     state.scanner.lastScanStatus = created
-      ? `${mode === "onepct" ? "1% setup" : "9/15 EMA setup"} found ${created} signal${created > 1 ? "s" : ""}`
-      : `${mode === "onepct" ? "1% setup" : "9/15 EMA setup"} found no setup`;
+      ? `${scannedLabels} found ${created} signal${created > 1 ? "s" : ""}`
+      : `${scannedLabels} found no setup`;
     saveState();
     renderScannerSettings();
     if (!silent) toast(state.scanner.lastScanStatus);
@@ -1314,7 +1353,7 @@ document.getElementById("scannerForm").addEventListener("submit", (event) => {
   state.scanner.signalCooldownMin = Math.max(5, Number(data.signalCooldownMin || 45));
   state.scanner.morningStart = data.morningStart || "09:15";
   state.scanner.morningEnd = data.morningEnd || "09:55";
-  state.scanner.dayStart = data.dayStart || "09:55";
+  state.scanner.dayStart = data.dayStart || "09:15";
   state.scanner.dayEnd = data.dayEnd || "15:30";
   state.scanner.morningBatchSize = Math.max(5, Number(data.morningBatchSize || 12));
   state.scanner.dayBatchSize = Math.max(3, Number(data.dayBatchSize || 6));
